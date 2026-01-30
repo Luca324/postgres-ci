@@ -1,0 +1,169 @@
+name: 03 - Docker Multi-version PostgreSQL Testing
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request: 
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-postgres-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        postgres-version: [14,15,16]
+        edition: [standard, enterprise]
+      fail-fast: false
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Start PostgreSQL ${{ matrix.postgres-version }} (${{ matrix.edition }})
+      run: |
+        docker run --name postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+        -e POSTGRES_PASSWORD=testpassword \
+        -p 5432:5432 \
+        postgres:${{ matrix.postgres-version }}
+
+    - name: Create test database and extension
+      run: |
+        docker exec --name postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+        psql -U postgres \
+        -c "
+          -- Создаем тестовую БД
+          CREATE DATABASE ci_test;
+          
+          -- Подключаемся к ней
+          \c ci_test
+          
+          -- Создаем 'расширение' - набор таблиц для мониторинга
+          CREATE TABLE IF NOT EXISTS db_metrics (
+            id BIGSERIAL PRIMARY KEY,
+            metric_name VARCHAR(100),
+            metric_value NUMERIC(10,2),
+            timestamp TIMESTAMP DEFAULT NOW(),
+            tags JSONB
+          );
+          
+          CREATE TABLE IF NOT EXISTS connections_log (
+            id BIGSERIAL PRIMARY KEY,
+            client_addr INET,
+            application_name TEXT,
+            backend_start TIMESTAMP,
+            query_start TIMESTAMP,
+            state TEXT
+          );
+          
+          -- Создаем представление для мониторинга
+          CREATE OR REPLACE VIEW monitoring_dashboard AS
+          SELECT 
+            metric_name,
+            AVG(metric_value) as avg_value,
+            MIN(metric_value) as min_value,
+            MAX(metric_value) as max_value,
+            COUNT(*) as samples
+          FROM db_metrics
+          WHERE timestamp > NOW() - INTERVAL '1 hour'
+          GROUP BY metric_name;
+          
+          -- Вставляем тестовые данные
+          INSERT INTO db_metrics (metric_name, metric_value, tags) VALUES
+            ('active_connections', 5.0, '{"type": "connection", "severity": "low"}'),
+            ('cpu_usage', 45.2, '{"type": "system", "severity": "medium"}'),
+            ('cache_hit_ratio', 98.7, '{"type": "performance", "severity": "low"}'),
+            ('replication_lag', 0.0, '{"type": "replication", "severity": "low"}'),
+            ('disk_usage_percent', 65.3, '{"type": "storage", "severity": "high"}');
+          "
+
+    - name: Run basic SQL tests
+      run: |
+        # Запускаем базовые тесты
+        echo "Running tests for PostgreSQL ${{ matrix.postgres-version }} (${{ matrix.edition }})..."
+        
+        # Тест 1: Проверяем что БД создана
+        DB_EXISTS=$(docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} psql \
+          -U postgres -t -c "SELECT 1 FROM pg_database WHERE datname = 'ci_test';" | tr -d '[:space:]')
+        
+        if [ "$DB_EXISTS" != "1" ]; then
+          echo "❌ Test FAILED: Database not created"
+          exit 1
+        fi
+        echo "✅ Database created successfully"
+        
+        # Тест 2: Проверяем что таблицы созданы
+        TABLES_COUNT=$(docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} psql \
+          -U postgres -d ci_test -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';" | tr -d '[:space:]')
+        
+        if [ "$TABLES_COUNT" -lt 2 ]; then
+          echo "❌ Test FAILED: Not enough tables created"
+          exit 1
+        fi
+        echo "✅ $TABLES_COUNT tables created"
+        
+        # Тест 3: Проверяем тестовые данные
+        ROW_COUNT=$(docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} psql \
+          -U postgres -d ci_test -t -c "SELECT COUNT(*) FROM db_metrics;" | tr -d '[:space:]')
+        
+        if [ "$ROW_COUNT" -lt 5 ]; then
+          echo "❌ Test FAILED: Not enough test data"
+          exit 1
+        fi
+        echo "✅ $ROW_COUNT rows of test data inserted"
+    
+    - name: Run pgbench performance test
+      run: |
+        echo "Running pgbench test..."
+        
+        # Инициализируем pgbench
+        docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+          pgbench -U postgres -i -s 10 ci_test
+        
+        # Запускаем тест на 30 секунд с 5 клиентами
+        docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+          pgbench -U postgres -c 5 -T 30 ci_test | tee pgbench_results.txt
+        
+        # Извлекаем TPS
+        TPS=$(grep "tps = " pgbench_results.txt | awk '{print $3}')
+        echo "Performance: $TPS transactions per second"
+        
+        # Проверяем минимальную производительность
+        if (( $(echo "$TPS < 100" | bc -l) )); then
+          echo "⚠️ Warning: Performance below 100 TPS"
+        fi
+    
+    - name: Save test results
+      if: always()  # Выполняется даже если предыдущие шаги упали
+      run: |
+        # Собираем результаты тестов
+        mkdir -p test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}
+        
+        # Получаем логи PostgreSQL
+        docker logs postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} > \
+          test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}/postgres.log 2>&1
+        
+        # Получаем информацию о версии
+        docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+          psql -U postgres -d ci_test -c "SELECT version();" > \
+          test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}/version.txt
+        
+        # Получаем информацию о расширениях
+        docker exec postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} \
+          psql -U postgres -d ci_test -c "SELECT * FROM pg_extension;" > \
+          test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}/extensions.txt
+        
+        cp pgbench_results.txt test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}/
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.postgres-version }}-${{ matrix.edition }}
+        path: test-results/${{ matrix.postgres-version }}-${{ matrix.edition }}
+    
+    - name: Cleanup Docker containers
+      if: always()
+      run: |
+        # Останавливаем и удаляем контейнеры
+        docker stop postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} || true
+        docker rm postgres-${{ matrix.postgres-version }}-${{ matrix.edition }} || true
