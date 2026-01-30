@@ -37,7 +37,7 @@ jobs:
         # Эмулируем установку расширения
         echo "Creating test tables..."
         
-        PORT=$((5432 + ${{ matrix.postgres-version }} - 14))
+        PORT=$((5432 + matrix.postgres-version - 14))
         sudo -u postgres psql -p $PORT -c "
           CREATE DATABASE extension_test;
           \c extension_test
