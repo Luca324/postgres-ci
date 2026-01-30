@@ -1,25 +1,25 @@
 name: 04 - Advanced Monitoring Test with Docker Compose
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Только ручной запуск
     inputs:
       postgres-version:
         description: 'PostgreSQL version'
         required: true
         default: '15'
       test-duration:
-        description: 'test duration in seconds'
+        description: 'Test duration in seconds'
         required: true
         default: '60'
 
 jobs:
-  full-monitoring:
+  full-monitoring-test:
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
+    
     - name: Create docker-compose.yml
       run: |
         cat > docker-compose.yml << EOF
@@ -27,11 +27,11 @@ jobs:
         
         services:
           postgres:
-            image: postgres:${{ github.evernt.inputs.postgres-version }}
+            image: postgres:${{ github.event.inputs.postgres-version }}
             environment:
               POSTGRES_PASSWORD: testpassword
-              POSTGRES_DB: monitoring_db 
-            ports: 
+              POSTGRES_DB: monitoring_db
+            ports:
               - "5432:5432"
             volumes:
               - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -41,22 +41,36 @@ jobs:
               interval: 10s
               timeout: 5s
               retries: 5
-
+            
           pgadmin:
             image: dpage/pgadmin4
+            environment:
+              PGADMIN_DEFAULT_EMAIL: admin@test.com
+              PGADMIN_DEFAULT_PASSWORD: admin
+            ports:
+              - "5050:80"
+            depends_on:
+              - postgres
+              
+          monitor:
+            image: alpine:latest
             command: >
               sh -c "
-              apk add --no-cache postgresql-client curl && sleep 10 && ./monitor.sh"
+              apk add --no-cache postgresql-client curl &&
+              sleep 10 &&
+              ./monitor.sh
+              "
             volumes:
               - ./scripts/monitor.sh:/monitor.sh
               - ./scripts:/scripts
             depends_on:
               postgres:
                 condition: service_healthy
-
+        
         volumes:
           postgres_data:
         EOF
+    
     - name: Create initialization script
       run: |
         mkdir -p scripts
@@ -215,34 +229,45 @@ jobs:
         
         chmod +x scripts/monitor.sh
     
-    - name: Start services with Docker Compose 
+    - name: Start services with Docker Compose
       run: |
+        echo "Starting Docker Compose services..."
+        docker-compose up -d
+        
+        # Ждем пока PostgreSQL будет готов
         echo "Waiting for PostgreSQL to be ready..."
-        timeout 60 bash -c 'until docker-compose exec postgres pg_isready -U postgrer; do sleep 2; done'
-
+        timeout 60 bash -c 'until docker-compose exec postgres pg_isready -U postgres; do sleep 2; done'
+    
     - name: Run monitoring test
       timeout-minutes: 5
       run: |
         echo "Running monitoring test for ${{ github.event.inputs.test-duration }} seconds..."
-
-        docker-compose up monitor 2> &1 | tee monitoring.log
+        
+        # Запускаем мониторинг
+        docker-compose up monitor 2>&1 | tee monitoring.log
+        
+        # Копируем логи
         docker-compose logs postgres > postgres.log
-
+    
     - name: Collect and save results
       if: always()
       run: |
         mkdir -p monitoring-results
-
-        cp monitoring.log monitoring-resuls/
-        cp postgres.log monitoring-resuls/
-
+        
+        # Копируем логи
+        cp monitoring.log monitoring-results/
+        cp postgres.log monitoring-results/
+        
+        # Экспортируем данные из БД
         docker-compose exec -T postgres psql -U postgres -d monitoring_db -c "
         \copy (SELECT * FROM monitoring.metrics ORDER BY timestamp) TO '/tmp/metrics.csv' CSV HEADER;
         \copy (SELECT * FROM monitoring.alerts ORDER BY triggered_at) TO '/tmp/alerts.csv' CSV HEADER;
-
+        "
+        
         docker cp $(docker-compose ps -q postgres):/tmp/metrics.csv monitoring-results/
         docker cp $(docker-compose ps -q postgres):/tmp/alerts.csv monitoring-results/
         
+        # Генерируем отчет
         echo "=== MONITORING TEST REPORT ===" > monitoring-results/report.txt
         echo "PostgreSQL Version: ${{ github.event.inputs.postgres-version }}" >> monitoring-results/report.txt
         echo "Test Duration: ${{ github.event.inputs.test-duration }} seconds" >> monitoring-results/report.txt
@@ -255,13 +280,13 @@ jobs:
         echo "" >> monitoring-results/report.txt
         echo "Alerts Triggered:" >> monitoring-results/report.txt
         tail -n +2 monitoring-results/alerts.csv | wc -l >> monitoring-results/report.txt
-        
+    
     - name: Upload monitoring results
       uses: actions/upload-artifact@v4
-      with: 
-        name: monitoring-resuls-v${{ github.event.inputs.postgres-version }}
-        path: monitoring-resuls/
-
+      with:
+        name: monitoring-results-v${{ github.event.inputs.postgres-version }}
+        path: monitoring-results/
+    
     - name: Cleanup
       if: always()
       run: |
