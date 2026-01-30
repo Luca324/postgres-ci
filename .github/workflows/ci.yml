@@ -1,19 +1,27 @@
-name: CI for postgres
+name: 01 - Simple PostgreSQL Test
 
-on:
-  push:
-    branches: [main]
+on: [push, pull_request]
 
 jobs:
-  hello-world:
+  test-postgres-connection:
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      with: 
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./
+    - name: Start PostgreSQL
+      run: |
+        sudo systemctl start postgresql
+
+    - name: Check PostgreSQL version
+      run: |
+        psql --version
+
+    - name: Create test database
+      run: |
+        sudo -u postgres psql -c "CREATE DATABASE ci_test;"
+
+    - name: Simple query test
+      run: |
+        sudo -u postgres psql -d ci_test -c "SELECT version();"
