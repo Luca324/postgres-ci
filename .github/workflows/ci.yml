@@ -3,8 +3,6 @@ name: CI for postgres
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   hello-world:
@@ -14,8 +12,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Say Hello
-      run: echo "Hello bro"
-
-    - name: Show date
-      run: date
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with: 
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./
