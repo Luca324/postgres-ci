@@ -25,6 +25,9 @@ jobs:
         # В реальности PostgresPro устанавливается из своих репозиториев
         sudo apt-get install -y postgresql-${{ matrix.postgres-version }}
 
+        sudo -u postgres /usr/lib/postgresql/${{ matrix.postgres-version }}/bin/initdb \
+            -D /var/lib/postgresql/${{ matrix.postgres-version }}/main
+
     - name: Start and configure PostgreSQL
       run: |
         sudo pg_ctlcluster ${{ matrix.postgres-version }} main start
