@@ -7,75 +7,82 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        postgres-version: [14,15,16]
-
+        postgres-version: [14, 15, 16]
+        include:
+          - postgres-version: 14
+            port: 5432
+          - postgres-version: 15
+            port: 5433
+          - postgres-version: 16
+            port: 5434
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Install PostgreSQL ${{ matrix.postgres-version }}
+    
+    - name: Start PostgreSQL ${{ matrix.postgres-version }} in Docker
       run: |
-        echo "Installing PostgreSQL version ${{ matrix.postgres-version }}"
-
-        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-        sudo apt-get update
-
-        # Здесь мы эмулируем установку PostgresPro
-        # В реальности PostgresPro устанавливается из своих репозиториев
-        sudo apt-get install -y postgresql-${{ matrix.postgres-version }}
-
-    - name: Init PostgreSQL
-      run: |
-        sudo -u postgres /usr/lib/postgresql/${{ matrix.postgres-version }}/bin/initdb \
-            -D /var/lib/postgresql/${{ matrix.postgres-version }}/main
-
-    - name: Start and configure PostgreSQL
-      run: |
-        sudo pg_ctlcluster ${{ matrix.postgres-version }} main start
-
-        # Каждая версия на своем порту
-        sudo -u postgres psql -p $((5432 + matrix.postgres-version - 14)) -c "SELECT version();"
-
-    - name: Create test extension (эмуляция)
-      run: |
-        # Эмулируем установку расширения
-        echo "Creating test tables..."
+        echo "Starting PostgreSQL ${{ matrix.postgres-version }} on port ${{ matrix.port }}"
         
-        PORT=$((5432 + matrix.postgres-version - 14))
-        sudo -u postgres psql -p $PORT -c "
-          CREATE DATABASE extension_test;
-          \c extension_test
-          
-          -- Создаем тестовую таблицу как будто это наше расширение
-          CREATE TABLE IF NOT EXISTS test_metrics (
+        docker run -d \
+          --name postgres-${{ matrix.postgres-version }} \
+          -e POSTGRES_PASSWORD=testpass \
+          -p ${{ matrix.port }}:5432 \
+          postgres:${{ matrix.postgres-version }}
+        
+        # Ждем пока PostgreSQL запустится
+        sleep 10
+        
+        # Проверяем что контейнер работает
+        docker ps | grep postgres-${{ matrix.postgres-version }}
+    
+    - name: Test connection
+      run: |
+        echo "Testing PostgreSQL ${{ matrix.postgres-version }} on localhost:${{ matrix.port }}"
+        
+        # Устанавливаем клиент (уже должен быть установлен)
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client
+        
+        # Проверяем подключение
+        PGPASSWORD=testpass psql -h localhost -p ${{ matrix.port }} -U postgres -c "SELECT version();"
+    
+    - name: Create test database and run queries
+      run: |
+        PGPASSWORD=testpass psql -h localhost -p ${{ matrix.port }} -U postgres -c "CREATE DATABASE test_db;"
+        
+        PGPASSWORD=testpass psql -h localhost -p ${{ matrix.port }} -U postgres -d test_db -c "
+          -- Создаем тестовую таблицу
+          CREATE TABLE version_test (
             id SERIAL PRIMARY KEY,
-            metric_name TEXT,
-            value FLOAT,
-            recorded_at TIMESTAMP DEFAULT NOW()
+            postgres_version TEXT DEFAULT '${{ matrix.postgres-version }}',
+            test_time TIMESTAMP DEFAULT NOW(),
+            test_data TEXT
           );
           
           -- Вставляем тестовые данные
-          INSERT INTO test_metrics (metric_name, value) VALUES
-            ('cpu_usage', 45.6),
-            ('memory_usage', 78.2),
-            ('disk_io', 120.5);
+          INSERT INTO version_test (test_data) VALUES 
+            ('Test data for PostgreSQL ${{ matrix.postgres-version }}'),
+            ('Running on port ${{ matrix.port }}');
+          
+          -- Проверяем
+          SELECT * FROM version_test;
         "
     
-    - name: Run tests on the extension
+    - name: Install pgbench and run simple test
       run: |
-        PORT=$((5432 + ${{ matrix.postgres-version }} - 14))
+        # Устанавливаем pgbench
+        sudo apt-get install -y postgresql-contrib
         
-        echo "Running tests for PostgreSQL ${{ matrix.postgres-version }}..."
+        # Инициализируем pgbench
+        PGPASSWORD=testpass pgbench -h localhost -p ${{ matrix.port }} -U postgres -i -s 5 test_db
         
-        # Проверяем что таблица создалась
-        sudo -u postgres psql -p $PORT -d extension_test -c "
-          SELECT COUNT(*) as table_count 
-          FROM information_schema.tables 
-          WHERE table_name = 'test_metrics';
-        "
-        
-        # Проверяем что данные есть
-        sudo -u postgres psql -p $PORT -d extension_test -c "
-          SELECT COUNT(*) as row_count FROM test_metrics;
-        "
+        # Запускаем короткий тест
+        echo "=== Pgbench test for PostgreSQL ${{ matrix.postgres-version }} ==="
+        PGPASSWORD=testpass pgbench -h localhost -p ${{ matrix.port }} -U postgres -c 2 -T 10 test_db
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        docker stop postgres-${{ matrix.postgres-version }} || true
+        docker rm postgres-${{ matrix.postgres-version }} || true
