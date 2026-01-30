@@ -1,4 +1,4 @@
-name: Postgres Pro Installation Test
+name: 02 - Postgres Pro Installation Test
 
 on: [push, pull_request]
 
