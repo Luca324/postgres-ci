@@ -25,3 +25,26 @@ jobs:
     - name: Simple query test
       run: |
         sudo -u postgres psql -d ci_test -c "SELECT version();"
+
+  run-basic-tests:
+    needs: test-postgres-connection
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install pgbench
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-contrib
+
+    - name: Initialize pgbench database
+      run: |
+        sudo -u postgres createdb pgbench_test
+        sudo -u postgres pgbench -i -s 10 pgbench_test
+
+    - name: Run simple benchmark
+      run: |
+        echo "Running 30-second benchmark with 5 clients"
+        sudo -u postgres pgbench -c 5 -T 30 pgbench_test
