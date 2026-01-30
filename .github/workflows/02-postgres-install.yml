@@ -1,0 +1,76 @@
+name: Postgres Pro Installation Test
+
+on: [push, pull_request]
+
+jobs:
+  install-defferent-postgres-versions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        postgres-version: [14,15,16]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install PostgreSQL ${{ matrix.postgres-version }}
+      run: |
+        echo "Installing PostgreSQL version ${{ matrix.postgres-version }}"
+
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+
+        # Здесь мы эмулируем установку PostgresPro
+        # В реальности PostgresPro устанавливается из своих репозиториев
+        sudo apt-get install -y postgresql-${{ matrix.postgres-version }}
+
+    - name: Start and configure PostgreSQL
+      run: |
+        sudo pg_ctlcluster ${{ matrix.postgres-version }} main start
+
+        # Каждая версия на своем порту
+        sudo -u postgres psql -p $((5432 + matrix.postgres-version - 14)) -c "SELECT version();"
+
+    - name: Create test extension (эмуляция)
+      run: |
+        # Эмулируем установку расширения
+        echo "Creating test tables..."
+        
+        PORT=$((5432 + ${{ matrix.postgres-version }} - 14))
+        sudo -u postgres psql -p $PORT -c "
+          CREATE DATABASE extension_test;
+          \c extension_test
+          
+          -- Создаем тестовую таблицу как будто это наше расширение
+          CREATE TABLE IF NOT EXISTS test_metrics (
+            id SERIAL PRIMARY KEY,
+            metric_name TEXT,
+            value FLOAT,
+            recorded_at TIMESTAMP DEFAULT NOW()
+          );
+          
+          -- Вставляем тестовые данные
+          INSERT INTO test_metrics (metric_name, value) VALUES
+            ('cpu_usage', 45.6),
+            ('memory_usage', 78.2),
+            ('disk_io', 120.5);
+        "
+    
+    - name: Run tests on the extension
+      run: |
+        PORT=$((5432 + ${{ matrix.postgres-version }} - 14))
+        
+        echo "Running tests for PostgreSQL ${{ matrix.postgres-version }}..."
+        
+        # Проверяем что таблица создалась
+        sudo -u postgres psql -p $PORT -d extension_test -c "
+          SELECT COUNT(*) as table_count 
+          FROM information_schema.tables 
+          WHERE table_name = 'test_metrics';
+        "
+        
+        # Проверяем что данные есть
+        sudo -u postgres psql -p $PORT -d extension_test -c "
+          SELECT COUNT(*) as row_count FROM test_metrics;
+        "
